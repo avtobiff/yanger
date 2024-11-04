@@ -584,7 +584,7 @@ verbose(Lvl, Ctx, Fmt, Args) ->
 
 parse_file_name(FileName) ->
     BaseName = filename:basename(FileName, ".yang"),
-    case string:tokens(BaseName, "@") of
+    case string:tokens(BaseName, "@#") of
         [ModuleName] ->
             {ok, ?l2a(ModuleName), undefined};
         [ModuleName, Revision] ->
@@ -728,7 +728,19 @@ add_parsed_stmt_tree(Ctx00, [{ModKeyword, ModuleName, Pos, Substmts} = Stmt],
                      FileName, AddCause,
                      ExpectedModuleName, ExpectedRevision, ExpectFailLevel,
                      IncludingModuleRevision) ->
-    ModuleRevision = get_latest_revision(Substmts, Ctx00),
+    {ModuleRevisionDate, ModuleRevisionVersion} =
+        get_latest_revision(Substmts, Ctx00),
+    %% Select revision to report
+    ModuleRevision =
+        case ExpectedRevision of
+            undefined ->
+                undefined;
+            _ ->
+                case re:run(ExpectedRevision, "\\d{4}-\\d{2}-\\d{2}") of
+                    {match, _} -> ModuleRevisionDate;
+                    nomatch    -> ModuleRevisionVersion
+                end
+        end,
     %% check that the module and revision is really the one we're looking for
     Ctx0 = if AddCause == primary ->
                    Primary = Ctx00#yctx.primary_module_names,
@@ -742,7 +754,10 @@ add_parsed_stmt_tree(Ctx00, [{ModKeyword, ModuleName, Pos, Substmts} = Stmt],
                            'YANG_ERR_MODULENAME_MISMATCH',
                            [ExpectedModuleName, ModuleName]),
                  ExpectFailLevel == error};
-           ModuleRevision /= ExpectedRevision, ExpectedRevision /= undefined ->
+           (ModuleRevisionDate /= ExpectedRevision
+            andalso
+            ModuleRevisionVersion /= ExpectedRevision),
+           ExpectedRevision /= undefined ->
                 {add_error(ExpectFailLevel, Ctx0, {FileName, 0},
                            'YANG_ERR_REVISION_MISMATCH',
                            [ExpectedRevision, ModuleRevision]),
@@ -5240,30 +5255,38 @@ map_keys(Map) ->
     gb_trees:keys(Map).
 
 get_latest_revision(Stmts, Ctx) ->
-    get_latest_revision(Stmts, undefined, Ctx).
-get_latest_revision([{Kwd, Arg, _Pos, _Substmts} | Stmts], Latest, Ctx) ->
+    get_latest_revision(Stmts, {_Date = undefined, _Vsn = undefined}, Ctx).
+get_latest_revision([{Kwd, Arg, _Pos, Substmts} | Stmts],
+                    {Date,  Vsn}, Ctx) ->
     if Kwd == 'revision' ->
-            if (Arg > Latest) orelse (Latest == undefined) ->
-                    get_latest_revision(Stmts, Arg, Ctx);
+            {Date, LatestVsn} = get_latest_revision(Substmts, {Date, Vsn}, Ctx),
+            if (Arg > Date) orelse (Date == undefined) ->
+                    get_latest_revision(Stmts, {Arg, LatestVsn}, Ctx);
                true ->
-                    get_latest_revision(Stmts, Latest, Ctx)
+                    get_latest_revision(Stmts, {Date, LatestVsn}, Ctx)
+            end;
+       Kwd == {'ietf-yang-semver', version} ->
+            if (Arg > Vsn) orelse (Vsn == undefined) ->
+                     {Date, Arg};
+               true ->
+                     get_latest_revision(Stmts, {Date, Vsn}, Ctx)
             end;
        true ->
             case kwd_class(Kwd, Ctx) of
                 header ->
-                    get_latest_revision(Stmts, Latest, Ctx);
+                    get_latest_revision(Stmts, {Date, Vsn}, Ctx);
                 linkage ->
-                    get_latest_revision(Stmts, Latest, Ctx);
+                    get_latest_revision(Stmts, {Date, Vsn}, Ctx);
                 meta ->
-                    get_latest_revision(Stmts, Latest, Ctx);
+                    get_latest_revision(Stmts, {Date, Vsn}, Ctx);
                 extension ->
-                    get_latest_revision(Stmts, Latest, Ctx);
+                    get_latest_revision(Stmts, {Date, Vsn}, Ctx);
                 body ->
-                    Latest
+                    {Date, Vsn}
             end
     end;
-get_latest_revision([], Latest, _Ctx) ->
-    Latest.
+get_latest_revision([], {Date, Vsn}, _Ctx) ->
+    {Date, Vsn}.
 
 %% FIXME: unused function
 %% get_namespace([{Kwd, Arg, _Pos, _Substmts} | Stmts]) ->
